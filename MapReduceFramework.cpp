@@ -9,6 +9,6 @@ typedef struct {
 } ClientContext;
 
 typedef struct {
-    ClientContext client_context;
+    ClientContext& client_context;
     IntermediateVec& intermediate_vec;
 } ThreadContext;
