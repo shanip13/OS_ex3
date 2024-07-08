@@ -12,14 +12,19 @@
 
 
 typedef struct {
-    JobState job_state;
-    const InputVec& inputVec; // TODO maybe change &
-    OutputVec& outputVec;
-    std::atomic<int>* atomic_counter;
-    pthread_t main_thread;
+    // general
     const MapReduceClient& client;
+    JobState job_state;
+    pthread_t main_thread;
+    // vectors
+    const InputVec& inputVec;
+    std::vector<IntermediateVec> intermediate_vecs;
+    OutputVec& outputVec;
+    // locks
+    std::atomic<int>* atomic_counter;
     Barrier* barrier;
     sem_t shuffle_semaphore;
+    pthread_mutex_t vector_mutex;
 } ClientContext;
 
 typedef struct {
@@ -81,14 +86,16 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 
   // define client_context
   ClientContext* client_context = new ClientContext {
-      {UNDEFINED_STAGE, 0},
-      inputVec,
-      outputVec,
-      new std::atomic<int>(0),
-      pthread_self(),
-      client,
-      &barrier,
-      sem_t()
+    client,
+    {UNDEFINED_STAGE, 0},
+    pthread_self(),
+    inputVec,
+    *(new std::vector<IntermediateVec>(multiThreadLevel)),
+    outputVec,
+    new std::atomic<int>(0),
+    &barrier,
+    sem_t(),
+    PTHREAD_MUTEX_INITIALIZER
   };
   sem_init(&(client_context->shuffle_semaphore), 0, 0);
 
@@ -101,7 +108,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     thread_context = new ThreadContext {
       i,
       client_context,
-      *(new IntermediateVec())
+      client_context->intermediate_vecs[i]
     };
     ret = pthread_create(&threads[i], NULL, thread_entry_point, thread_context);
     if (ret) {
