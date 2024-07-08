@@ -8,6 +8,8 @@
 #include <iostream>
 #include <unistd.h>
 #include <algorithm>
+#include <semaphore.h>
+
 
 typedef struct {
     JobState job_state;
@@ -17,9 +19,11 @@ typedef struct {
     pthread_t main_thread;
     const MapReduceClient& client;
     Barrier* barrier;
+    sem_t shuffle_semaphore;
 } ClientContext;
 
 typedef struct {
+    int thread_id;
     ClientContext* client_context;
     IntermediateVec& intermediate_vec;
 } ThreadContext;
@@ -29,25 +33,22 @@ bool compareIntermediatePair(const IntermediatePair& pair1, const IntermediatePa
 }
 
 void* thread_entry_point(void *arg) {
-  ClientContext* client_context = (ClientContext*) arg;
-
-  // define thread_context
-  ThreadContext* thread_context = new ThreadContext {
-      client_context,
-      *(new IntermediateVec())
-  };
+  ThreadContext* thread_context = (ThreadContext*) arg;
+  ClientContext* client_context = thread_context->client_context;
 
   // map phase
   const InputPair* curr_pair;
   int prev_count;
   while ((prev_count = (client_context->atomic_counter->fetch_add(1))) <
   client_context->inputVec.size()) {
+    std::cout << "Thread " << thread_context->thread_id << " map phase\n";
     curr_pair = &(client_context->inputVec[prev_count]);
     client_context->client.map(curr_pair->first, curr_pair->second,
                            thread_context);
   }
 
   // sort phase
+  std::cout << "Thread " << thread_context->thread_id << " sort phase\n";
   std::sort(thread_context->intermediate_vec.begin(),
             thread_context->intermediate_vec.end(),
             compareIntermediatePair);
@@ -55,8 +56,20 @@ void* thread_entry_point(void *arg) {
   // barrier
   client_context->barrier->barrier();
 
+  // shuffle phase
+  if (thread_context->thread_id == 0) {
+    std::cout << "Thread " << thread_context->thread_id << " shuffle phase\n";
+    sem_post(&client_context->shuffle_semaphore);
+    client_context->atomic_counter->store(0);
+  }
+  else {
+    sem_wait(&client_context->shuffle_semaphore);
+    sem_post(&client_context->shuffle_semaphore);
+  }
+  std::cout << "Thread " << thread_context->thread_id << " reducing phase\n";
+
   // reduce phase
-  // TODO use semaphore to wait until shuffle finished
+
 
   pthread_exit(NULL);
 }
@@ -74,15 +87,23 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
       new std::atomic<int>(0),
       pthread_self(),
       client,
-      &barrier
+      &barrier,
+      sem_t()
   };
+  sem_init(&(client_context->shuffle_semaphore), 0, 0);
 
   // create threads
   pthread_t threads[multiThreadLevel];
   int ret;
+  ThreadContext* thread_context;
   for(int i = 0; i < multiThreadLevel; i++) {
     printf("Creating thread %d\n", i);
-    ret = pthread_create(&threads[i], NULL, thread_entry_point,client_context);
+    thread_context = new ThreadContext {
+      i,
+      client_context,
+      *(new IntermediateVec())
+    };
+    ret = pthread_create(&threads[i], NULL, thread_entry_point, thread_context);
     if (ret) {
       printf("ERROR; return code from pthread_create() is %d\n", ret);
       exit(-1);
