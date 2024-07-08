@@ -215,7 +215,9 @@ JobHandle startMapReduceJob(const MapReduceClient &client,
             sem_t(), // shuffle_semaphore
             PTHREAD_MUTEX_INITIALIZER // vector_mutex
     };
-    sem_init(&(client_context->shuffle_semaphore), 0, 0);
+    if(sem_init(&(client_context->shuffle_semaphore), 0, 0)!=0){
+        std::cerr<<"system error: failed in semaphore init\n";
+    }
 
     // create threads
     pthread_t threads[multiThreadLevel];
