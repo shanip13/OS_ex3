@@ -57,7 +57,6 @@ void closeJobHandle(JobHandle job){
         std::cerr << "Failed to destroy semaphore" << std::endl;  // TODO maybe delete
     }
     delete context->atomic_counter;
-    delete context->barrier;
     delete context;
 }
 
@@ -95,7 +94,7 @@ int shuffle(ClientContext* client_context) {
     for (auto& vec : intermediate_vecs) {
       curr_key = vec.back().first;
       if (*largest_key < *curr_key) {
-        *largest_key = *curr_key;
+        largest_key = curr_key;
       }
     }
 
@@ -105,7 +104,7 @@ int shuffle(ClientContext* client_context) {
       while (!vec.empty() && K2_equals(vec.back().first, largest_key)) {
         shuffled_queue.back().push_back(vec.back());
         vec.pop_back();
-        client_context->job_state->percentage += 1.0/intermediate_size;
+        client_context->job_state->percentage += 100.0/intermediate_size;
       }
     }
   }
@@ -120,11 +119,10 @@ void* thread_entry_point(void *arg) {
   client_context->job_state->stage = MAP_STAGE;
   const InputPair* curr_pair;
   int prev_count;
-  float input_size = client_context->inputVec.size();
+  size_t input_size = client_context->inputVec.size();
   while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < input_size) {
     client_context->job_state->percentage =
-        client_context->atomic_counter->load()/input_size;
-    std::cout << "Thread " << thread_context->thread_id << " map phase\n";
+        100.0*client_context->atomic_counter->load()/input_size;
     curr_pair = &(client_context->inputVec[prev_count]);
     client_context->client.map(curr_pair->first, curr_pair->second,
                            thread_context);
@@ -132,7 +130,6 @@ void* thread_entry_point(void *arg) {
   }
 
   // sort phase
-  std::cout << "Thread " << thread_context->thread_id << " sort phase\n";
   std::sort(thread_context->intermediate_vec.begin(),
             thread_context->intermediate_vec.end(),
             compareIntermediatePair);
@@ -144,7 +141,6 @@ void* thread_entry_point(void *arg) {
   if (thread_context->thread_id == 0) {
     client_context->job_state->stage = SHUFFLE_STAGE;
     client_context->job_state->percentage=0;
-    std::cout << "Thread " << thread_context->thread_id << " shuffle phase\n";
     shuffle(client_context);
     sem_post(&client_context->shuffle_semaphore);
     client_context->atomic_counter->store(0);
@@ -155,18 +151,13 @@ void* thread_entry_point(void *arg) {
     sem_wait(&client_context->shuffle_semaphore);
     sem_post(&client_context->shuffle_semaphore);
   }
-  std::cout << "Thread " << thread_context->thread_id << " reducing phase\n";
 
   // reduce phase
   IntermediateVec* curr_vec;
-  float shuffled_size = client_context->shuffled_queue.size();
-  printf("%d\n",client_context->atomic_counter->load());
-  printf("%f\n",shuffled_size);
+  size_t shuffled_size = client_context->shuffled_queue.size();
   while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < shuffled_size) {
     client_context->job_state->percentage =
-        client_context->atomic_counter->load()/shuffled_size;
-    printf("!!!!!!!\n");
-    std::cout << "Thread " << thread_context->thread_id << " map phase\n";
+        100.0*client_context->atomic_counter->load()/shuffled_size;
     curr_vec = &(client_context->shuffled_queue[prev_count]);
     client_context->client.reduce(curr_vec, thread_context);
     // TODO reduce uses emit3 to put results into client_context->outputvec
@@ -204,7 +195,6 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
   int ret;
   ThreadContext* thread_context;
   for(int i = 0; i < multiThreadLevel; i++) {
-    printf("Creating thread %d\n", i);
     thread_context = new ThreadContext {
       i, // thread_id
       client_context, // client_context
@@ -212,7 +202,6 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     };
     ret = pthread_create(&threads[i], NULL, thread_entry_point, thread_context);
     if (ret) {
-      printf("ERROR; return code from pthread_create() is %d\n", ret);
       exit(-1);
     }
   }
@@ -223,8 +212,6 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
   }
 
   int i = *(client_context->atomic_counter);
-  printf("%d\n", i);
-  printf("bye\n");
   return (JobHandle) client_context;
 }
 
