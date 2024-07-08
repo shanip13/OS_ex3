@@ -20,9 +20,12 @@ typedef struct {
     const InputVec& inputVec;
     std::vector<IntermediateVec> intermediate_vecs;
     std::vector<IntermediateVec> shuffled_queue;
+    size_t intermediate_size;
     OutputVec& outputVec;
     // locks
+    std::atomic<bool>* is_waited;
     std::atomic<int>* atomic_counter;
+    std::atomic<int>* shuffled_counter;
     Barrier* barrier;
     sem_t shuffle_semaphore;
     pthread_mutex_t vector_mutex;
@@ -35,9 +38,16 @@ typedef struct {
 } ThreadContext;
 
 void waitForJob(JobHandle job) {
-  auto* context = static_cast<ClientContext*>(job);
-  if (pthread_join(context->main_thread, nullptr) != 0) {
+  if (job == nullptr) {
+    return;
+  }
+
+  auto *client_context = static_cast<ClientContext *>(job);
+  if (!client_context->is_waited->exchange(true)) {
+    if (pthread_join (client_context->main_thread, nullptr) != 0)
+    {
       std::cerr << "Error joining job thread.\n";
+    }
   }
 }
 
@@ -67,7 +77,7 @@ bool compareIntermediatePair(const IntermediatePair& pair1, const IntermediatePa
 }
 
 bool K2_equals(K2* key1, K2* key2) {
-  return (not (*key1 < *key2)) && (not (*key2 < *key1));
+  return (! (*key1 < *key2)) && (! (*key2 < *key1));
 }
 
 int shuffle(ClientContext* client_context) {
@@ -78,8 +88,9 @@ int shuffle(ClientContext* client_context) {
   for (const auto& vec : intermediate_vecs) {
     intermediate_size += vec.size();
   }
+  client_context->intermediate_size = intermediate_size;
 
-  while (not intermediate_vecs.empty()) {
+  while (! intermediate_vecs.empty()) {
     // delete empty vectors
     auto it = intermediate_vecs.begin();
     while (it != intermediate_vecs.end()) {
@@ -121,12 +132,12 @@ void* thread_entry_point(void *arg) {
   int prev_count;
   size_t input_size = client_context->inputVec.size();
   while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < input_size) {
-    client_context->job_state->percentage =
-        100.0*client_context->atomic_counter->load()/input_size;
     curr_pair = &(client_context->inputVec[prev_count]);
     client_context->client.map(curr_pair->first, curr_pair->second,
                            thread_context);
-    // TODO map uses emit2 to put results into thread_context->intermediatevec
+    // update percentage
+    client_context->job_state->percentage =
+        100.0*client_context->atomic_counter->load()/input_size;
   }
 
   // sort phase
@@ -154,13 +165,15 @@ void* thread_entry_point(void *arg) {
 
   // reduce phase
   IntermediateVec* curr_vec;
-  size_t shuffled_size = client_context->shuffled_queue.size();
-  while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < shuffled_size) {
-    client_context->job_state->percentage =
-        100.0*client_context->atomic_counter->load()/shuffled_size;
+  size_t intermediate_size = client_context->intermediate_size;
+  size_t num_vectors = client_context->shuffled_queue.size();
+  while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < num_vectors) {
     curr_vec = &(client_context->shuffled_queue[prev_count]);
     client_context->client.reduce(curr_vec, thread_context);
-    // TODO reduce uses emit3 to put results into client_context->outputvec
+    // update percentage
+    client_context->shuffled_counter->fetch_add(client_context->shuffled_queue[prev_count].size());
+    client_context->job_state->percentage =
+        100.0*client_context->shuffled_counter->load()/intermediate_size;
   }
 
   pthread_exit(NULL);
@@ -181,9 +194,12 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     inputVec, // inputVec
     std::vector<IntermediateVec>(multiThreadLevel), // intermediate_vecs
     std::vector<IntermediateVec>(), // shuffle_queue
+    0, // intermediate_size
     outputVec, // outputVec
     // locks
+    new std::atomic<bool>(false), // is_waited
     new std::atomic<int>(0), // atomic_counter
+    new std::atomic<int>(0), // shuffled_counter
     &barrier, // barrier
     sem_t(), // shuffle_semaphore
     PTHREAD_MUTEX_INITIALIZER // vector_mutex
