@@ -14,7 +14,7 @@
 typedef struct {
     // general
     const MapReduceClient& client;
-    JobState job_state;
+    JobState* job_state;
     pthread_t main_thread;
     // vectors
     const InputVec& inputVec;
@@ -35,13 +35,15 @@ typedef struct {
 } ThreadContext;
 
 void waitForJob(JobHandle job) {
-    if (pthread_join(jobHandle.main_thread, nullptr) != 0) {
-        std::cerr << "Error joining job thread.\n";
-    }
+  ClientContext* context = static_cast<ClientContext*>(job);
+  if (pthread_join(context->main_thread, nullptr) != 0) {
+      std::cerr << "Error joining job thread.\n";
+  }
 }
 
 void getJobState(JobHandle job, JobState* state){
-    job.job_state = state;  // TODO maybe change
+  ClientContext* context = static_cast<ClientContext*>(job);
+  context->job_state = state;  // TODO maybe change
 }
 
 void closeJobHandle(JobHandle job){
@@ -54,7 +56,7 @@ void closeJobHandle(JobHandle job){
     if (sem_destroy(&context->shuffle_semaphore) != 0) {
         std::cerr << "Failed to destroy semaphore" << std::endl;  // TODO maybe delete
     }
-    delete context->atocim_counter;
+    delete context->atomic_counter;
     delete context->barrier;
     delete context;
 
@@ -163,12 +165,12 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
   ClientContext* client_context = new ClientContext {
     // general
     client, // client
-    {UNDEFINED_STAGE, 0}, // job_state
+    new JobState {UNDEFINED_STAGE, 0}, // job_state
     pthread_self(), // main_thread
     // vectors
     inputVec, // inputVec
-    *(new std::vector<IntermediateVec>(multiThreadLevel)), // intermediate_vecs
-    *(new std::vector<IntermediateVec>()), // shuffle_queue
+    std::vector<IntermediateVec>(multiThreadLevel), // intermediate_vecs
+    std::vector<IntermediateVec>(), // shuffle_queue
     outputVec, // outputVec
     // locks
     new std::atomic<int>(0), // atomic_counter
