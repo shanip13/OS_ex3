@@ -34,6 +34,34 @@ typedef struct {
     IntermediateVec& intermediate_vec;
 } ThreadContext;
 
+void waitForJob(JobHandle job) {
+    if (pthread_join(jobHandle.main_thread, nullptr) != 0) {
+        std::cerr << "Error joining job thread.\n";
+    }
+}
+
+void getJobState(JobHandle job, JobState* state){
+    job.job_state = state;  // TODO maybe change
+}
+
+void closeJobHandle(JobHandle job){
+    if (job == nullptr) {
+        return;
+    }
+    ClientContext* context = static_cast<ClientContext*>(job);
+
+    pthread_join(context->main_thread, nullptr);
+    if (sem_destroy(&context->shuffle_semaphore) != 0) {
+        std::cerr << "Failed to destroy semaphore" << std::endl;  // TODO maybe delete
+    }
+    delete context->atocim_counter;
+    delete context->barrier;
+    delete context;
+
+}
+
+
+
 bool compareIntermediatePair(const IntermediatePair& pair1, const IntermediatePair& pair2) {
   return pair1.first < pair2.first;
 }
