@@ -33,7 +33,6 @@ typedef struct {
 typedef struct {
     int thread_id;
     ClientContext *client_context;
-    IntermediateVec &intermediate_vec;
 } ThreadContext;
 
 
@@ -55,8 +54,7 @@ void waitForJob(JobHandle job) {
 }
 
 void change_phase(ClientContext* client_context, uint64_t new_stage, uint64_t phase_size) {
-  uint64_t new_state = (((uint64_t) new_stage) << 62)
-                     + (((uint64_t) phase_size) << 31);
+  uint64_t new_state = (((uint64_t) new_stage) << 62) + (((uint64_t) phase_size) << 31);
   client_context->job_state->store(new_state);
 }
 
@@ -68,7 +66,7 @@ void getJobState(JobHandle job, JobState *state) {
   auto *client_context = static_cast<ClientContext *>(job);
 
   uint64_t job_stage = client_context->job_state->load();
-  stage_t stage = (stage_t) ((client_context->job_state->load()) >> 62);
+  stage_t stage = (stage_t) (job_stage >> 62);
   float finished = job_stage & (0x7FFFFFFF);
   float all = (job_stage >> 31) & (0x7FFFFFFF);
   state->percentage = 100.0*finished/all;
@@ -115,6 +113,7 @@ int shuffle(ClientContext *client_context) {
         // find the largest key
         K2 *curr_key;
         K2 *largest_key = intermediate_vecs[0].back().first;
+        int sizee =  intermediate_vecs[0].size();
         for (auto &vec: intermediate_vecs) {
             curr_key = vec.back().first;
             if (*largest_key < *curr_key) {
@@ -152,8 +151,8 @@ void *thread_entry_point(void *arg) {
     }
 
     // sort phase
-    std::sort(thread_context->intermediate_vec.begin(),
-              thread_context->intermediate_vec.end(),
+    std::sort(client_context->intermediate_vecs[thread_context->thread_id].begin(),
+              client_context->intermediate_vecs[thread_context->thread_id].end(),
               compareIntermediatePair);
 
     // barrier
@@ -226,8 +225,7 @@ JobHandle startMapReduceJob(const MapReduceClient &client,
     for (int i = 0; i < multiThreadLevel; i++) {
         thread_context = new ThreadContext{
           i, // thread_id
-          client_context, // client_context
-          client_context->intermediate_vecs[i] // intermediate_vec
+          client_context // client_context
         };
         ret = pthread_create(&client_context->threads[i], NULL, thread_entry_point,
                              thread_context);
@@ -242,14 +240,14 @@ JobHandle startMapReduceJob(const MapReduceClient &client,
 
 void emit2(K2 *key, V2 *value, void *context) {
     auto *ctx = static_cast<ThreadContext *>(context);
-    IntermediatePair element{key, value};
     int ret;
     ret = pthread_mutex_lock(&ctx->client_context->vector_mutex);
     if (ret != 0) {
       std::cout << "system error: failed in mutex_lock\n";
       exit(1);
     }
-    ctx->intermediate_vec.push_back(element);
+    ctx->client_context->intermediate_vecs[ctx->thread_id].push_back
+    (std::pair<K2 *, V2 *>(key, value));
     ret = pthread_mutex_unlock(&ctx->client_context->vector_mutex);
     if (ret != 0) {
       std::cout << "system error: failed in mutex_unlock\n";
@@ -259,14 +257,13 @@ void emit2(K2 *key, V2 *value, void *context) {
 
 void emit3(K3 *key, V3 *value, void *context) {
     auto *ctx = static_cast<ThreadContext *>(context);
-    OutputPair element{key, value};
     int ret;
     ret = pthread_mutex_lock(&ctx->client_context->vector_mutex);
     if(ret !=0){
       std::cout<<"system error: failed in mutex_lock\n";
       exit(1);
     }
-    ctx->client_context->outputVec.push_back(element);
+    ctx->client_context->outputVec.push_back(std::pair<K3 *, V3 *>(key, value));
     ret = pthread_mutex_unlock(&ctx->client_context->vector_mutex);
     if(ret !=0){
       std::cout<<"system error: failed in mutex_unlock\n";
