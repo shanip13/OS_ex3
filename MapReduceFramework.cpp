@@ -43,7 +43,7 @@ void waitForJob(JobHandle job) {
 
 void getJobState(JobHandle job, JobState* state){
   ClientContext* context = static_cast<ClientContext*>(job);
-  context->job_state = state;  // TODO maybe change
+  *state = *(context->job_state);
 }
 
 void closeJobHandle(JobHandle job){
@@ -59,7 +59,6 @@ void closeJobHandle(JobHandle job){
     delete context->atomic_counter;
     delete context->barrier;
     delete context;
-
 }
 
 
