@@ -14,8 +14,8 @@
 typedef struct {
     // general
     const MapReduceClient &client;
-    JobState *job_state;
-    pthread_t main_thread;
+    std::atomic<uint64_t>* job_state;
+    std::vector<pthread_t> threads;
     // vectors
     const InputVec &inputVec;
     std::vector<IntermediateVec> intermediate_vecs;
@@ -25,7 +25,6 @@ typedef struct {
     // locks
     std::atomic<bool> *is_waited;
     std::atomic<int> *atomic_counter;
-    std::atomic<int> *shuffled_counter;
     Barrier *barrier;
     sem_t shuffle_semaphore;
     pthread_mutex_t vector_mutex;
@@ -42,18 +41,38 @@ void waitForJob(JobHandle job) {
     if (job == nullptr) {
         return;
     }
-
     auto *client_context = static_cast<ClientContext *>(job);
     if (!client_context->is_waited->exchange(true)) {
-        if (pthread_join(client_context->main_thread, nullptr) != 0) {
-            std::cerr << "system error: failed in joining job thread.\n";
+      for (auto &thread : client_context->threads) {
+        int ret = pthread_join (thread, nullptr);
+        if (ret != 0)
+        {
+          std::cout << "system error: failed in joining job thread.\n";
+          exit(1);
         }
+      }
     }
 }
 
+void change_phase(ClientContext* client_context, uint64_t new_stage, uint64_t phase_size) {
+  uint64_t new_state = (((uint64_t) new_stage) << 62)
+                     + (((uint64_t) phase_size) << 31);
+  client_context->job_state->store(new_state);
+}
+
+void progress_state_by_num(ClientContext* client_context, size_t to_add) {
+  client_context->job_state->fetch_add(to_add & (0x7FFFFFFF));
+}
+
 void getJobState(JobHandle job, JobState *state) {
-    auto *context = static_cast<ClientContext *>(job);
-    *state = *(context->job_state);
+  auto *client_context = static_cast<ClientContext *>(job);
+
+  uint64_t job_stage = client_context->job_state->load();
+  stage_t stage = (stage_t) ((client_context->job_state->load()) >> 62);
+  float finished = job_stage & (0x7FFFFFFF);
+  float all = (job_stage >> 31) & (0x7FFFFFFF);
+  state->percentage = 100.0*finished/all;
+  state->stage = stage;
 }
 
 void closeJobHandle(JobHandle job) {
@@ -62,11 +81,10 @@ void closeJobHandle(JobHandle job) {
     }
     auto *context = static_cast<ClientContext *>(job);
 
-    if (pthread_join(context->main_thread, nullptr) != 0) {
-        std::cerr << "system error: failed in joining job thread.\n";
-    }
+  waitForJob(job);
     if (sem_destroy(&context->shuffle_semaphore) != 0) {
-        std::cerr << "system error: failed to destroy semaphore\n";
+      std::cout << "system error: failed to destroy semaphore\n";
+      exit(1);
     }
     delete context->atomic_counter;
     delete context;
@@ -84,12 +102,6 @@ bool K2_equals(K2 *key1, K2 *key2) {
 int shuffle(ClientContext *client_context) {
     std::vector<IntermediateVec> &intermediate_vecs = client_context->intermediate_vecs;
     std::vector<IntermediateVec> &shuffled_queue = client_context->shuffled_queue;
-    // get num of intermediate elements
-    size_t intermediate_size = 0;
-    for (const auto &vec: intermediate_vecs) {
-        intermediate_size += vec.size();
-    }
-    client_context->intermediate_size = intermediate_size;
 
     while (!intermediate_vecs.empty()) {
         // delete empty vectors
@@ -102,7 +114,7 @@ int shuffle(ClientContext *client_context) {
 
         // find the largest key
         K2 *curr_key;
-        K2 *largest_key = intermediate_vecs[0][0].first;
+        K2 *largest_key = intermediate_vecs[0].back().first;
         for (auto &vec: intermediate_vecs) {
             curr_key = vec.back().first;
             if (*largest_key < *curr_key) {
@@ -116,7 +128,7 @@ int shuffle(ClientContext *client_context) {
             while (!vec.empty() && K2_equals(vec.back().first, largest_key)) {
                 shuffled_queue.back().push_back(vec.back());
                 vec.pop_back();
-                client_context->job_state->percentage += 100.0 / intermediate_size;
+                progress_state_by_num(client_context, 1);
             }
         }
     }
@@ -128,22 +140,15 @@ void *thread_entry_point(void *arg) {
     ClientContext *client_context = thread_context->client_context;
 
     // map phase
-    client_context->job_state->stage = MAP_STAGE;
+    size_t input_size = client_context->inputVec.size();
     const InputPair *curr_pair;
     int prev_count;
-    size_t input_size = client_context->inputVec.size();
     while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < input_size) {
-        curr_pair = &(client_context->inputVec[prev_count]);
-        client_context->client.map(curr_pair->first, curr_pair->second,
+      // map element
+      curr_pair = &(client_context->inputVec[prev_count]);
+      client_context->client.map(curr_pair->first, curr_pair->second,
                                    thread_context);
-        // update percentage
-        try {
-            client_context->job_state->percentage =
-                    100.0 * client_context->atomic_counter->load() / input_size;
-        } catch (const std::exception &e) {
-            // Handle exception if needed
-            std::cerr << "system error: failed in loading atomic variable.\n";
-        }
+      progress_state_by_num(client_context, 1);
     }
 
     // sort phase
@@ -156,13 +161,17 @@ void *thread_entry_point(void *arg) {
 
     // shuffle phase
     if (thread_context->thread_id == 0) {
-        client_context->job_state->stage = SHUFFLE_STAGE;
-        client_context->job_state->percentage = 0;
+        // get num of intermediate elements
+        size_t intermediate_size = 0;
+        for (const auto &vec: client_context->intermediate_vecs) {
+          intermediate_size += vec.size();
+        }
+        client_context->intermediate_size = intermediate_size;
+        change_phase(client_context, SHUFFLE_STAGE, intermediate_size);
         shuffle(client_context);
-        sem_post(&client_context->shuffle_semaphore);
         client_context->atomic_counter->store(0);
-        client_context->job_state->stage = REDUCE_STAGE;
-        client_context->job_state->percentage = 0;
+        change_phase(client_context, REDUCE_STAGE, intermediate_size);
+        sem_post(&client_context->shuffle_semaphore);
     } else {
         sem_wait(&client_context->shuffle_semaphore);
         sem_post(&client_context->shuffle_semaphore);
@@ -173,18 +182,9 @@ void *thread_entry_point(void *arg) {
     size_t intermediate_size = client_context->intermediate_size;
     size_t num_vectors = client_context->shuffled_queue.size();
     while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < num_vectors) {
-        curr_vec = &(client_context->shuffled_queue[prev_count]);
-        client_context->client.reduce(curr_vec, thread_context);
-        // update percentage
-        client_context->shuffled_counter->fetch_add(client_context->shuffled_queue[prev_count].size());
-        try {
-            client_context->job_state->percentage =
-                    100.0 * client_context->shuffled_counter->load() / intermediate_size;
-        } catch (const std::exception &e) {
-            // Handle exception if needed
-            std::cerr << "system error: failed in loading atomic variable.\n";
-        }
-
+      curr_vec = &(client_context->shuffled_queue[prev_count]);
+      client_context->client.reduce(curr_vec, thread_context);
+      progress_state_by_num(client_context, client_context->shuffled_queue[prev_count].size());
     }
 
     pthread_exit(NULL);
@@ -193,56 +193,50 @@ void *thread_entry_point(void *arg) {
 JobHandle startMapReduceJob(const MapReduceClient &client,
                             const InputVec &inputVec, OutputVec &outputVec,
                             int multiThreadLevel) {
-    Barrier barrier(multiThreadLevel);
-
+    Barrier* barrier = new Barrier(multiThreadLevel);
     // define client_context
     ClientContext *client_context = new ClientContext{
-            // general
-            client, // client
-            new JobState{UNDEFINED_STAGE, 0}, // job_state
-            pthread_self(), // main_thread
-            // vectors
-            inputVec, // inputVec
-            std::vector<IntermediateVec>(multiThreadLevel), // intermediate_vecs
-            std::vector<IntermediateVec>(), // shuffle_queue
-            0, // intermediate_size
-            outputVec, // outputVec
-            // locks
-            new std::atomic<bool>(false), // is_waited
-            new std::atomic<int>(0), // atomic_counter
-            new std::atomic<int>(0), // shuffled_counter
-            &barrier, // barrier
-            sem_t(), // shuffle_semaphore
-            PTHREAD_MUTEX_INITIALIZER // vector_mutex
+      // general
+      client, // client
+      new std::atomic<uint64_t>(0), // job_state
+      std::vector<pthread_t>(multiThreadLevel), // threads
+      // vectors
+      inputVec, // inputVec
+      std::vector<IntermediateVec>(multiThreadLevel), // intermediate_vecs
+      std::vector<IntermediateVec>(), // shuffle_queue
+      0, // intermediate_size
+      outputVec, // outputVec
+      // locks
+      new std::atomic<bool>(false), // is_waited
+      new std::atomic<int>(0), // atomic_counter
+      barrier, // barrier
+      sem_t(), // shuffle_semaphore
+      PTHREAD_MUTEX_INITIALIZER // vector_mutex
     };
     if(sem_init(&(client_context->shuffle_semaphore), 0, 0)!=0){
-        std::cerr<<"system error: failed in semaphore init\n";
+      std::cout<<"system error: failed in semaphore init\n";
+      exit(1);
     }
 
     // create threads
-    pthread_t threads[multiThreadLevel];
     int ret;
     ThreadContext *thread_context;
+    size_t input_size = inputVec.size();
+    change_phase(client_context, MAP_STAGE, input_size);
     for (int i = 0; i < multiThreadLevel; i++) {
         thread_context = new ThreadContext{
-                i, // thread_id
-                client_context, // client_context
-                client_context->intermediate_vecs[i] // intermediate_vec
+          i, // thread_id
+          client_context, // client_context
+          client_context->intermediate_vecs[i] // intermediate_vec
         };
-        ret = pthread_create(&threads[i], NULL, thread_entry_point, thread_context);
+        ret = pthread_create(&client_context->threads[i], NULL, thread_entry_point,
+                             thread_context);
         if (ret != 0) {
-            std::cerr << "system error: failed creating pthread\n";
+            std::cout << "system error: failed creating pthread\n";
+            exit(1);
         }
     }
 
-    // wait for all threads to finish
-    for (int i = 0; i < multiThreadLevel; ++i) {
-        if (pthread_join(threads[i], NULL) != 0) {
-            std::cerr << "system error: failed in joining job thread.\n";
-        }
-    }
-
-    int i = *(client_context->atomic_counter);
     return (JobHandle) client_context;
 }
 
@@ -252,12 +246,14 @@ void emit2(K2 *key, V2 *value, void *context) {
     int ret;
     ret = pthread_mutex_lock(&ctx->client_context->vector_mutex);
     if (ret != 0) {
-        std::cerr << "system error: failed in mutex_lock\n";
+      std::cout << "system error: failed in mutex_lock\n";
+      exit(1);
     }
     ctx->intermediate_vec.push_back(element);
     ret = pthread_mutex_unlock(&ctx->client_context->vector_mutex);
     if (ret != 0) {
-        std::cerr << "system error: failed in mutex_unlock\n";
+      std::cout << "system error: failed in mutex_unlock\n";
+      exit(1);
     }
 }
 
@@ -267,12 +263,14 @@ void emit3(K3 *key, V3 *value, void *context) {
     int ret;
     ret = pthread_mutex_lock(&ctx->client_context->vector_mutex);
     if(ret !=0){
-        std::cerr<<"system error: failed in mutex_lock\n";
+      std::cout<<"system error: failed in mutex_lock\n";
+      exit(1);
     }
     ctx->client_context->outputVec.push_back(element);
     ret = pthread_mutex_unlock(&ctx->client_context->vector_mutex);
     if(ret !=0){
-        std::cerr<<"system error: failed in mutex_unlock\n";
+      std::cout<<"system error: failed in mutex_unlock\n";
+      exit(1);
     }
 
 }

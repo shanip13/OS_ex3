@@ -89,14 +89,14 @@ int main(int argc, char** argv)
             printf("stage %d, %f%% \n",
 			state.stage, state.percentage);
         }
-		usleep(100000);
+		usleep(100);
         last_state = state;
 		getJobState(job, &state);
 	}
 	printf("stage %d, %f%% \n",
 			state.stage, state.percentage);
 	printf("Done!\n");
-
+    waitForJob (job);
 	closeJobHandle(job);
 
 	for (OutputPair& pair: outputVec) {

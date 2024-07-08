@@ -1,0 +1,14 @@
+shanip13, yaala.oren
+Shani Pinker (325693604), Yaala Oren (325972057)
+EX: 3
+
+FILES:
+MapReduceFramework.cpp -- implementation of the MapReduce library
+Barrier.cpp -- a class providing a multiple use barrier
+Barrier.h -- a header for Barrier.cpp
+MakeFile -- makefile for compiling the library
+README.txt -- this file
+
+REMARKS:
+
+ANSWERS:
