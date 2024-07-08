@@ -71,8 +71,15 @@ bool K2_equals(K2* key1, K2* key2) {
   return (not (*key1 < *key2)) && (not (*key2 < *key1));
 }
 
-int shuffle(std::vector<IntermediateVec> &intermediate_vecs,
-            std::vector<IntermediateVec> &shuffled_queue) {
+int shuffle(ClientContext* client_context) {
+  std::vector<IntermediateVec> &intermediate_vecs = client_context->intermediate_vecs;
+  std::vector<IntermediateVec> &shuffled_queue = client_context->shuffled_queue;
+  // get num of intermediate elements
+  size_t intermediate_size = 0;
+  for (const auto& vec : intermediate_vecs) {
+    intermediate_size += vec.size();
+  }
+
   while (not intermediate_vecs.empty()) {
     // delete empty vectors
     auto it = intermediate_vecs.begin();
@@ -98,6 +105,7 @@ int shuffle(std::vector<IntermediateVec> &intermediate_vecs,
       while (!vec.empty() && K2_equals(vec.back().first, largest_key)) {
         shuffled_queue.back().push_back(vec.back());
         vec.pop_back();
+        client_context->job_state->percentage += 1.0/intermediate_size;
       }
     }
   }
@@ -109,10 +117,13 @@ void* thread_entry_point(void *arg) {
   ClientContext* client_context = thread_context->client_context;
 
   // map phase
+  client_context->job_state->stage = MAP_STAGE;
   const InputPair* curr_pair;
   int prev_count;
-  while ((prev_count = (client_context->atomic_counter->fetch_add(1))) <
-  client_context->inputVec.size()) {
+  float input_size = client_context->inputVec.size();
+  while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < input_size) {
+    client_context->job_state->percentage =
+        client_context->atomic_counter->load()/input_size;
     std::cout << "Thread " << thread_context->thread_id << " map phase\n";
     curr_pair = &(client_context->inputVec[prev_count]);
     client_context->client.map(curr_pair->first, curr_pair->second,
@@ -131,10 +142,14 @@ void* thread_entry_point(void *arg) {
 
   // shuffle phase
   if (thread_context->thread_id == 0) {
+    client_context->job_state->stage = SHUFFLE_STAGE;
+    client_context->job_state->percentage=0;
     std::cout << "Thread " << thread_context->thread_id << " shuffle phase\n";
-    shuffle(client_context->intermediate_vecs, client_context->shuffled_queue);
+    shuffle(client_context);
     sem_post(&client_context->shuffle_semaphore);
     client_context->atomic_counter->store(0);
+    client_context->job_state->stage = REDUCE_STAGE;
+    client_context->job_state->percentage=0;
   }
   else {
     sem_wait(&client_context->shuffle_semaphore);
@@ -144,8 +159,13 @@ void* thread_entry_point(void *arg) {
 
   // reduce phase
   IntermediateVec* curr_vec;
-  while ((prev_count = (client_context->atomic_counter->fetch_add(1))) <
-         client_context->shuffled_queue.size()) {
+  float shuffled_size = client_context->shuffled_queue.size();
+  printf("%d\n",client_context->atomic_counter->load());
+  printf("%f\n",shuffled_size);
+  while ((prev_count = (client_context->atomic_counter->fetch_add(1))) < shuffled_size) {
+    client_context->job_state->percentage =
+        client_context->atomic_counter->load()/shuffled_size;
+    printf("!!!!!!!\n");
     std::cout << "Thread " << thread_context->thread_id << " map phase\n";
     curr_vec = &(client_context->shuffled_queue[prev_count]);
     client_context->client.reduce(curr_vec, thread_context);
