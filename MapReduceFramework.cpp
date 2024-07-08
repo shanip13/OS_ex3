@@ -37,6 +37,7 @@ typedef struct {
     IntermediateVec& intermediate_vec;
 } ThreadContext;
 
+
 void waitForJob(JobHandle job) {
   if (job == nullptr) {
     return;
