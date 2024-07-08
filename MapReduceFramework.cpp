@@ -35,14 +35,14 @@ typedef struct {
 } ThreadContext;
 
 void waitForJob(JobHandle job) {
-  ClientContext* context = static_cast<ClientContext*>(job);
+  auto* context = static_cast<ClientContext*>(job);
   if (pthread_join(context->main_thread, nullptr) != 0) {
       std::cerr << "Error joining job thread.\n";
   }
 }
 
 void getJobState(JobHandle job, JobState* state){
-  ClientContext* context = static_cast<ClientContext*>(job);
+  auto* context = static_cast<ClientContext*>(job);
   *state = *(context->job_state);
 }
 
@@ -50,7 +50,7 @@ void closeJobHandle(JobHandle job){
     if (job == nullptr) {
         return;
     }
-    ClientContext* context = static_cast<ClientContext*>(job);
+    auto* context = static_cast<ClientContext*>(job);
 
     pthread_join(context->main_thread, nullptr);
     if (sem_destroy(&context->shuffle_semaphore) != 0) {
@@ -206,4 +206,21 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
   printf("%d\n", i);
   printf("bye\n");
   return (JobHandle) client_context;
+}
+
+void emit2 (K2* key, V2* value, void* context){
+    auto* ctx = static_cast<ThreadContext*>(context);
+    IntermediatePair element{key, value};
+    pthread_mutex_lock(&ctx->client_context->vector_mutex);
+    ctx->intermediate_vec.push_back(element);
+    pthread_mutex_unlock(&ctx->client_context->vector_mutex);
+}
+
+void emit3 (K3* key, V3* value, void* context){
+    auto* ctx = static_cast<ThreadContext*>(context);
+    OutputPair element{key, value};
+    pthread_mutex_lock(&ctx->client_context->vector_mutex);
+    ctx->client_context->outputVec.push_back(element);
+    pthread_mutex_unlock(&ctx->client_context->vector_mutex);
+
 }
